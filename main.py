@@ -6,9 +6,10 @@ from PyQt6.QtWidgets import (
     QPushButton, QListWidget, QTextEdit, QLabel,
     QSlider, QComboBox
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from bleak import BleakScanner, BleakClient
 import qasync
+import pygame
 
 # BuWizz 2.0 BLE constants
 BUWIZZ_SERVICE_UUID = "936e67b1-1999-b388-144f-b740000054e"
@@ -83,6 +84,21 @@ class BuWizzApp(QWidget):
         self.reset_btn.setEnabled(False)
         self.reset_btn.clicked.connect(self.on_reset_sliders)
         layout.addWidget(self.reset_btn)
+
+        # 5) Joystick Control Section
+        layout.addWidget(QLabel("→ 5) Joystick Control"))
+        self.joystick_btn = QPushButton("Enable Joystick")
+        self.joystick_btn.setCheckable(True)
+        self.joystick_btn.clicked.connect(self.on_joystick_toggle)
+        layout.addWidget(self.joystick_btn)
+        self.js_status = QLabel("Status: Not connected")
+        layout.addWidget(self.js_status)
+        
+        # Initialize joystick variables
+        self.joystick = None
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.read_joystick)
+        self.steering_gain = 0.3  # Adjust steering sensitivity
 
         # Log
         layout.addWidget(QLabel("Log:"))
@@ -189,7 +205,9 @@ class BuWizzApp(QWidget):
 
     async def send_motor_data(self, m1, m2, m3, m4, brake=0):
         # clamp to −127…127
-        def clamp(x): return max(-127, min(127, x)) & 0xFF
+        def clamp(x): 
+            x = int(round(max(-127, min(127, x))))
+            return x & 0xFF
         pkt = bytes([
             0x10,
             clamp(m1), clamp(m2), clamp(m3), clamp(m4),
@@ -213,6 +231,112 @@ class BuWizzApp(QWidget):
     async def _write(self, data: bytes):
         if self.client and self.client.is_connected:
             await self.client.write_gatt_char(DATA_CHAR_UUID, data, False)
+
+    # ── Joystick Handling ────────────────────────────────────
+    def init_joystick(self):
+        try:
+            pygame.init()
+            pygame.joystick.init()
+            if pygame.joystick.get_count() > 0:
+                self.joystick = pygame.joystick.Joystick(0)
+                self.joystick.init()
+                self.js_status.setText(f"Connected: {self.joystick.get_name()}")
+                # Set axis mapping
+                self.STEER_AXIS = 0  # X-axis for steering
+                self.THROTTLE_AXIS = 1  # Y-axis for throttle (forward/reverse)
+                return True
+            self.js_status.setText("No joystick detected")
+        except Exception as e:
+            self.js_status.setText(f"Error: {str(e)}")
+        return False
+
+    def read_joystick(self):
+        if not self.joystick or not self.client or not self.client.is_connected:
+            return
+            
+        pygame.event.pump()  # Process event queue
+        
+        try:
+            # Get axis values (-1.0 to 1.0)
+            steering = self.joystick.get_axis(self.STEER_AXIS)
+            throttle = -self.joystick.get_axis(self.THROTTLE_AXIS)  # Invert so forward is up
+            
+            # Deadzone to prevent small movements from activating motors
+            deadzone = 0.1
+            if abs(throttle) < deadzone and abs(steering) < deadzone:
+                self.update_motor_sliders(0, 0, 0, 0)
+                asyncio.create_task(self.send_motor_data(0, 0, 0, 0))
+                return
+                
+            # Tank-style steering calculation
+            # Base power from throttle
+            base_power = throttle * 127
+            
+            # Steering effect (differential power)
+            steering_effect = steering * abs(base_power) * self.steering_gain
+            
+            # Calculate motor powers
+            left_power = base_power + steering_effect
+            right_power = base_power - steering_effect
+            
+            # Invert the right motor (since it's mounted opposite)
+            right_power = -right_power
+            
+            # Clamp values to motor range
+            left_power = max(-127, min(127, left_power))
+            right_power = max(-127, min(127, right_power))
+            
+            # Convert to integers
+            left_power = int(round(left_power))
+            right_power = int(round(right_power))
+            
+            # Update sliders and send command
+            self.update_motor_sliders(left_power, right_power, 0, 0)
+            asyncio.create_task(self.send_motor_data(left_power, right_power, 0, 0))
+            
+            # Log values for debugging
+            self.log.append(f"🎮 T:{throttle:.2f} S:{steering:.2f} → L:{left_power} R:{right_power}")
+            
+        except Exception as e:
+            self.log.append(f"🎮 Joystick error: {e}")
+
+    def on_joystick_toggle(self, checked):
+        if checked:
+            if self.init_joystick():
+                self.timer.start(50)  # 20Hz update
+                self.log.append("🎮 Joystick enabled")
+            else:
+                self.joystick_btn.setChecked(False)
+        else:
+            self.timer.stop()
+            if self.joystick:
+                self.joystick.quit()
+            self.js_status.setText("Status: Disabled")
+            self.log.append("🎮 Joystick disabled")
+            # Reset motors when disabling
+            asyncio.create_task(self.send_motor_data(0, 0, 0, 0))
+
+
+    def update_motor_sliders(self, m1, m2, m3, m4):
+        """Update sliders without triggering send events"""
+        # Block signals during update
+        for sld, _ in self.sliders:
+            sld.blockSignals(True)
+        
+        self.sliders[0][0].setValue(int(m1))
+        self.sliders[1][0].setValue(int(m2))
+        self.sliders[2][0].setValue(int(m3))
+        self.sliders[3][0].setValue(int(m4))
+        
+        # Update labels
+        self.sliders[0][1].setText(str(int(m1)))
+        self.sliders[1][1].setText(str(int(m2)))
+        self.sliders[2][1].setText(str(int(m3)))
+        self.sliders[3][1].setText(str(int(m4)))
+        
+        # Re-enable signals
+        for sld, _ in self.sliders:
+            sld.blockSignals(False)
 
     # ── Qt slots ────────────────────────────────────────────
     def on_scan(self):      asyncio.create_task(self.scan())
