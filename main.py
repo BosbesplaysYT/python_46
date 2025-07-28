@@ -4,16 +4,70 @@ import time
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QListWidget, QTextEdit, QLabel,
-    QSlider, QComboBox
+    QSlider, QComboBox, QLineEdit, QSplitter
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QImage, QPixmap, QPainter
 from bleak import BleakScanner, BleakClient
 import qasync
 import pygame
+import cv2
+import numpy as np
 
 # BuWizz 2.0 BLE constants
 BUWIZZ_SERVICE_UUID = "936e67b1-1999-b388-144f-b740000054e"
 DATA_CHAR_UUID       = "000092d1-0000-1000-8000-00805f9b34fb"
+
+
+class CameraThread(QThread):
+    new_frame = pyqtSignal(np.ndarray)
+    error_occurred = pyqtSignal(str)
+    
+    def __init__(self, url):
+        super().__init__()
+        self.url = url
+        self.running = False
+        self.frame_counter = 0
+        self.frame_skip = 1  # Process every Nth frame
+        self.last_frame = None
+
+    def run(self):
+        self.running = True
+        cap = cv2.VideoCapture(self.url)
+        
+        if not cap.isOpened():
+            self.error_occurred.emit("Failed to open camera stream")
+            return
+            
+        # Set lower resolution if supported
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+        
+        # Request MJPEG stream if possible
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        
+        # Reduce buffer size to minimize latency
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        
+        while self.running:
+            self.frame_counter += 1
+            if self.frame_counter % self.frame_skip != 0:
+                continue
+                
+            ret, frame = cap.read()
+            if not ret:
+                self.error_occurred.emit("Frame read error")
+                break
+                
+            # Store frame without copy for reuse
+            self.last_frame = frame
+            self.new_frame.emit(frame)
+        
+        cap.release()
+
+    def stop(self):
+        self.running = False
+        self.wait()
 
 class BuWizzApp(QWidget):
     def __init__(self):
@@ -100,6 +154,45 @@ class BuWizzApp(QWidget):
         self.timer.timeout.connect(self.read_joystick)
         self.steering_gain = 0.1  # Adjust steering sensitivity
 
+        # Add after joystick section
+        layout.addWidget(QLabel("→ FPV Camera Stream"))
+        
+        # Camera URL input
+        url_layout = QHBoxLayout()
+        url_layout.addWidget(QLabel("Camera URL:"))
+        self.camera_url = QLineEdit("http://192.168.178.93:8080/video")
+        url_layout.addWidget(self.camera_url)
+        layout.addLayout(url_layout)
+        
+        # Camera control buttons
+        btn_layout = QHBoxLayout()
+        self.cam_start_btn = QPushButton("Start Stream")
+        self.cam_start_btn.clicked.connect(self.start_camera_stream)
+        btn_layout.addWidget(self.cam_start_btn)
+        
+        self.cam_stop_btn = QPushButton("Stop Stream")
+        self.cam_stop_btn.clicked.connect(self.stop_camera_stream)
+        self.cam_stop_btn.setEnabled(False)
+        btn_layout.addWidget(self.cam_stop_btn)
+        
+        # Performance controls
+        self.quality_combo = QComboBox()
+        self.quality_combo.addItems(["Low (15fps)", "Medium (20fps)", "High (30fps)"])
+        self.quality_combo.setCurrentIndex(1)
+        btn_layout.addWidget(self.quality_combo)
+        
+        layout.addLayout(btn_layout)
+        
+        # Video display
+        self.video_label = QLabel()
+        self.video_label.setMinimumSize(320, 240)
+        self.video_label.setStyleSheet("background-color: black;")
+        layout.addWidget(self.video_label)
+        
+        # Camera variables
+        self.camera_thread = None
+        self.last_frame_time = 0
+
         # Log
         layout.addWidget(QLabel("Log:"))
         self.log = QTextEdit()
@@ -107,6 +200,84 @@ class BuWizzApp(QWidget):
         layout.addWidget(self.log)
 
         self.setLayout(layout)
+
+    # Camera stream functions
+    # Camera stream functions
+    def start_camera_stream(self):
+        if not self.camera_url.text():
+            self.log.append("⚠️ Enter camera URL first")
+            return
+            
+        if self.camera_thread and self.camera_thread.isRunning():
+            self.stop_camera_stream()
+            
+        self.camera_thread = CameraThread(self.camera_url.text())
+        
+        # Configure based on quality selection
+        quality = self.quality_combo.currentIndex()
+        if quality == 0:    # Low
+            self.camera_thread.frame_skip = 2
+        elif quality == 1:  # Medium
+            self.camera_thread.frame_skip = 1
+        else:               # High
+            self.camera_thread.frame_skip = 0  # Process all frames
+            
+        self.camera_thread.new_frame.connect(self.update_frame, Qt.ConnectionType.QueuedConnection)
+        self.camera_thread.error_occurred.connect(self.handle_camera_error)
+        self.camera_thread.start()
+        
+        self.cam_start_btn.setEnabled(False)
+        self.cam_stop_btn.setEnabled(True)
+        self.log.append("▶ Camera stream started")
+
+    def stop_camera_stream(self):
+        if self.camera_thread:
+            self.camera_thread.stop()
+            self.camera_thread = None
+            
+        self.cam_start_btn.setEnabled(True)
+        self.cam_stop_btn.setEnabled(False)
+        self.video_label.clear()
+        self.video_label.setStyleSheet("background-color: black;")
+        self.log.append("⏹ Camera stream stopped")
+
+    @pyqtSlot(np.ndarray)
+    def update_frame(self, frame):
+        # Calculate actual FPS
+        current_time = time.time()
+        fps = 1 / (current_time - self.last_frame_time) if self.last_frame_time else 0
+        self.last_frame_time = current_time
+        
+        # Only update display if we have >10 FPS or it's been >100ms since last update
+        if fps < 10 and (current_time - self.last_frame_time) < 0.1:
+            return
+            
+        # Convert to QImage without copying data
+        h, w, ch = frame.shape
+        bytes_per_line = ch * w
+        q_img = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+        
+        # Scale to display size while maintaining aspect ratio
+        pixmap = QPixmap.fromImage(q_img).scaled(
+            self.video_label.width(), 
+            self.video_label.height(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.FastTransformation
+        )
+        self.video_label.setPixmap(pixmap)
+        
+        # Display FPS in corner
+        painter = QPainter(pixmap)
+        painter.setPen(Qt.GlobalColor.red)
+        painter.drawText(10, 20, f"FPS: {fps:.1f}")
+        painter.end()
+        
+        self.video_label.setPixmap(pixmap)
+
+    @pyqtSlot(str)
+    def handle_camera_error(self, message):
+        self.log.append(f"❌ Camera Error: {message}")
+        self.stop_camera_stream()
 
     # ── BLE scan ─────────────────────────────────────────────
     async def scan(self):
