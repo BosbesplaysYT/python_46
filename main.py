@@ -98,7 +98,7 @@ class BuWizzApp(QWidget):
         self.joystick = None
         self.timer = QTimer()
         self.timer.timeout.connect(self.read_joystick)
-        self.steering_gain = 0.3  # Adjust steering sensitivity
+        self.steering_gain = 0.1  # Adjust steering sensitivity
 
         # Log
         layout.addWidget(QLabel("Log:"))
@@ -112,7 +112,7 @@ class BuWizzApp(QWidget):
     async def scan(self):
         self.device_list.clear()
         self.devices.clear()
-        self.log.append("🔍 Scanning for BuWizz (5 s)…")
+        self.log.append("🔍 Scanning for BuWizz (3 s)…")
         def cb(dev, adv):
             name = dev.name or adv.local_name or "Unknown"
             uuids = adv.service_uuids or []
@@ -122,7 +122,7 @@ class BuWizzApp(QWidget):
                 self.devices[dev.address] = dev
                 self.log.append(f"  • {name} [{dev.address}]")
         scanner = BleakScanner(detection_callback=cb)
-        await scanner.start(); await asyncio.sleep(5); await scanner.stop()
+        await scanner.start(); await asyncio.sleep(3); await scanner.stop()
         for addr, d in self.devices.items():
             n = d.name or "BuWizz"
             self.device_list.addItem(f"{n} ({addr})")
@@ -259,7 +259,7 @@ class BuWizzApp(QWidget):
         try:
             # Get axis values (-1.0 to 1.0)
             steering = self.joystick.get_axis(self.STEER_AXIS)
-            throttle = -self.joystick.get_axis(self.THROTTLE_AXIS)  # Invert so forward is up
+            throttle = self.joystick.get_axis(self.THROTTLE_AXIS)  # Invert so forward is up
             
             # Deadzone to prevent small movements from activating motors
             deadzone = 0.1
@@ -268,12 +268,19 @@ class BuWizzApp(QWidget):
                 asyncio.create_task(self.send_motor_data(0, 0, 0, 0))
                 return
                 
-            # Tank-style steering calculation
+            # Calculate absolute speed factor (0-1)
+            speed_factor = min(1.0, abs(throttle))
+            
+            # DYNAMIC STEERING GAIN: 
+            # - High gain (0.5) at low speeds
+            # - Low gain (0.1) at high speeds
+            steering_gain = 0.5 - (0.4 * speed_factor)
+            
             # Base power from throttle
             base_power = throttle * 127
             
             # Steering effect (differential power)
-            steering_effect = steering * abs(base_power) * self.steering_gain
+            steering_effect = steering * abs(base_power) * steering_gain
             
             # Calculate motor powers
             left_power = base_power + steering_effect
@@ -295,7 +302,7 @@ class BuWizzApp(QWidget):
             asyncio.create_task(self.send_motor_data(left_power, right_power, 0, 0))
             
             # Log values for debugging
-            self.log.append(f"🎮 T:{throttle:.2f} S:{steering:.2f} → L:{left_power} R:{right_power}")
+            self.log.append(f"🎮 T:{throttle:.2f} S:{steering:.2f} Gain:{steering_gain:.2f} → L:{left_power} R:{right_power}")
             
         except Exception as e:
             self.log.append(f"🎮 Joystick error: {e}")
@@ -303,7 +310,7 @@ class BuWizzApp(QWidget):
     def on_joystick_toggle(self, checked):
         if checked:
             if self.init_joystick():
-                self.timer.start(50)  # 20Hz update
+                self.timer.start(30)  # 20Hz update
                 self.log.append("🎮 Joystick enabled")
             else:
                 self.joystick_btn.setChecked(False)
