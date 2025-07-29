@@ -4,10 +4,11 @@ import time
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QListWidget, QTextEdit, QLabel,
-    QSlider, QComboBox, QLineEdit, QSplitter
+    QSlider, QComboBox, QLineEdit, QSplitter, 
+    QTabWidget, QFrame, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QImage, QPixmap, QPainter
+from PyQt6.QtGui import QImage, QPixmap, QPainter, QFont, QColor
 from bleak import BleakScanner, BleakClient
 import qasync
 import pygame
@@ -18,6 +19,22 @@ import numpy as np
 BUWIZZ_SERVICE_UUID = "936e67b1-1999-b388-144f-b740000054e"
 DATA_CHAR_UUID       = "000092d1-0000-1000-8000-00805f9b34fb"
 
+# Custom QLabel for status indicators
+class StatusLabel(QLabel):
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setFixedHeight(20)
+        self.set_status("disconnected")
+        
+    def set_status(self, status):
+        self.status = status
+        if status == "connected":
+            self.setStyleSheet("background-color: #4CAF50; color: white; border-radius: 5px;")
+        elif status == "disconnected":
+            self.setStyleSheet("background-color: #F44336; color: white; border-radius: 5px;")
+        elif status == "active":
+            self.setStyleSheet("background-color: #2196F3; color: white; border-radius: 5px;")
 
 class CameraThread(QThread):
     new_frame = pyqtSignal(np.ndarray)
@@ -40,8 +57,8 @@ class CameraThread(QThread):
             return
             
         # Set lower resolution if supported
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         
         # Request MJPEG stream if possible
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
@@ -72,136 +89,349 @@ class CameraThread(QThread):
 class BuWizzApp(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("BuWizz 2.0 Controller")
-        self.resize(500, 850)
-
+        self.setWindowTitle("BuWizz FPV Controller")
+        self.resize(1200, 800)
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #2c3e50;
+                color: #ecf0f1;
+                font-family: 'Segoe UI';
+            }
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px;
+                min-height: 15px;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+            QPushButton:disabled {
+                background-color: #7f8c8d;
+            }
+            QPushButton#danger {
+                background-color: #e74c3c;
+            }
+            QPushButton#danger:hover {
+                background-color: #c0392b;
+            }
+            QPushButton#success {
+                background-color: #2ecc71;
+            }
+            QPushButton#success:hover {
+                background-color: #27ae60;
+            }
+            QTabWidget::pane {
+                border: 1px solid #34495e;
+                background: #34495e;
+                border-radius: 4px;
+            }
+            QTabBar::tab {
+                background: #2c3e50;
+                color: #bdc3c7;
+                padding: 8px 15px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                border: 1px solid #34495e;
+            }
+            QTabBar::tab:selected {
+                background: #3498db;
+                color: white;
+                border-bottom: 2px solid #3498db;
+            }
+            QListWidget, QTextEdit, QLineEdit, QComboBox {
+                background-color: #34495e;
+                border: 1px solid #2c3e50;
+                border-radius: 4px;
+                padding: 5px;
+                color: #ecf0f1;
+            }
+            QSlider::groove:horizontal {
+                height: 8px;
+                background: #34495e;
+                border-radius: 4px;
+            }
+            QSlider::handle:horizontal {
+                background: #3498db;
+                border: 1px solid #2980b9;
+                width: 18px;
+                margin: -5px 0;
+                border-radius: 9px;
+            }
+            QSlider::sub-page:horizontal {
+                background: #3498db;
+                border-radius: 4px;
+            }
+            QFrame {
+                background-color: #34495e;
+                border-radius: 8px;
+                padding: 15px;
+            }
+            QLabel#title {
+                font-size: 16px;
+                font-weight: bold;
+                color: #3498db;
+                padding: 5px 0;
+            }
+            QLabel#section {
+                font-size: 14px;
+                font-weight: bold;
+                padding: 5px 0;
+                color: #3498db;
+            }
+        """)
+        
         self.devices = {}
         self.client = None
 
-        layout = QVBoxLayout()
+        # Main layout
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(15, 15, 15, 15)
+        main_layout.setSpacing(15)
 
-        # 1) Scan & Connect
-        layout.addWidget(QLabel("→ 1) Scan & Connect"))
+        # Create a horizontal splitter for camera and controls
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        
+        # Left panel - Camera view
+        camera_frame = QFrame()
+        camera_frame.setObjectName("cameraFrame")
+        camera_frame.setStyleSheet("QFrame#cameraFrame { background-color: black; border-radius: 8px; }")
+        camera_layout = QVBoxLayout(camera_frame)
+        camera_layout.setContentsMargins(10, 10, 10, 10)
+        camera_layout.setSpacing(10)
+        
+        # Camera title bar
+        camera_title = QHBoxLayout()
+        camera_title.addWidget(QLabel("FPV CAMERA FEED"))
+        
+        # Status indicators
+        status_layout = QHBoxLayout()
+        self.camera_status = StatusLabel("CAMERA: OFF")
+        self.buwizz_status = StatusLabel("BUWIZZ: DISCONNECTED")
+        status_layout.addWidget(self.camera_status)
+        status_layout.addWidget(self.buwizz_status)
+        camera_title.addLayout(status_layout)
+        camera_layout.addLayout(camera_title)
+        
+        # Video display
+        self.video_label = QLabel()
+        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.video_label.setMinimumSize(640, 480)
+        self.video_label.setStyleSheet("background-color: black;")
+        camera_layout.addWidget(self.video_label, 1)
+        
+        # Camera controls
+        cam_control_layout = QHBoxLayout()
+        
+        # Camera URL input
+        url_layout = QVBoxLayout()
+        url_layout.addWidget(QLabel("Camera URL:"))
+        self.camera_url = QLineEdit("http://192.168.178.93:8080/video")
+        url_layout.addWidget(self.camera_url)
+        cam_control_layout.addLayout(url_layout)
+        
+        # Camera control buttons
+        self.cam_start_btn = QPushButton("Start Stream")
+        self.cam_start_btn.setObjectName("success")
+        self.cam_start_btn.clicked.connect(self.start_camera_stream)
+        cam_control_layout.addWidget(self.cam_start_btn)
+        
+        self.cam_stop_btn = QPushButton("Stop Stream")
+        self.cam_stop_btn.setObjectName("danger")
+        self.cam_stop_btn.clicked.connect(self.stop_camera_stream)
+        self.cam_stop_btn.setEnabled(False)
+        cam_control_layout.addWidget(self.cam_stop_btn)
+        
+        # Performance controls
+        quality_layout = QVBoxLayout()
+        quality_layout.addWidget(QLabel("Quality:"))
+        self.quality_combo = QComboBox()
+        self.quality_combo.addItems(["Low (15fps)", "Medium (20fps)", "High (30fps)"])
+        self.quality_combo.setCurrentIndex(1)
+        quality_layout.addWidget(self.quality_combo)
+        cam_control_layout.addLayout(quality_layout)
+        
+        camera_layout.addLayout(cam_control_layout)
+        
+        # Right panel - Control tabs
+        tabs_frame = QFrame()
+        tabs_layout = QVBoxLayout(tabs_frame)
+        tabs_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.tab_widget = QTabWidget()
+        self.tab_widget.setStyleSheet("QTabWidget { background: transparent; }")
+        
+        # Connection Tab
+        connection_tab = QWidget()
+        connection_layout = QVBoxLayout(connection_tab)
+        connection_layout.setSpacing(15)
+        
+        # Connection section
+        conn_frame = QFrame()
+        conn_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        conn_layout = QVBoxLayout(conn_frame)
+        conn_layout.setContentsMargins(15, 15, 15, 15)
+        
+        conn_title = QLabel("BUWIZZ CONNECTION")
+        conn_title.setObjectName("title")
+        conn_layout.addWidget(conn_title)
+        
+        # Scan button at top
+        scan_layout = QHBoxLayout()
         self.scan_btn = QPushButton("Scan for BuWizz")
+        self.scan_btn.setObjectName("success")
         self.scan_btn.clicked.connect(self.on_scan)
-        layout.addWidget(self.scan_btn)
+        scan_layout.addWidget(self.scan_btn)
+        conn_layout.addLayout(scan_layout)
+        
+        # Device list
         self.device_list = QListWidget()
-        layout.addWidget(self.device_list)
-        hc = QHBoxLayout()
+        self.device_list.setFixedHeight(80)  # Reduced height
+        conn_layout.addWidget(self.device_list)
+        
+        # Connect buttons
+        conn_btn_layout = QHBoxLayout()
         self.connect_btn = QPushButton("Connect")
+        self.connect_btn.setObjectName("success")
         self.connect_btn.clicked.connect(self.on_connect)
-        hc.addWidget(self.connect_btn)
+        conn_btn_layout.addWidget(self.connect_btn)
+        
         self.disconnect_btn = QPushButton("Disconnect")
+        self.disconnect_btn.setObjectName("danger")
         self.disconnect_btn.clicked.connect(self.on_disconnect)
         self.disconnect_btn.setEnabled(False)
-        hc.addWidget(self.disconnect_btn)
-        layout.addLayout(hc)
-
-        # 2) Quick Motor 1 Test
-        layout.addWidget(QLabel("→ 2) Quick Motor 1 Test"))
-        self.test1_btn = QPushButton("Run Motor 1 for 1 s")
-        self.test1_btn.clicked.connect(self.on_test1)
-        self.test1_btn.setEnabled(False)
-        layout.addWidget(self.test1_btn)
-
-        # 3) Power Level Selector
-        layout.addWidget(QLabel("→ 3) Power Level"))
-        pl_layout = QHBoxLayout()
+        conn_btn_layout.addWidget(self.disconnect_btn)
+        conn_layout.addLayout(conn_btn_layout)
+        
+        # Power control
+        power_layout = QHBoxLayout()
+        power_layout.addWidget(QLabel("Power Level:"))
         self.power_combo = QComboBox()
         self.power_combo.addItems(["Disabled", "Slow", "Normal", "Fast", "LDCRS"])
         self.power_combo.setCurrentIndex(2)  # default Normal
         self.power_combo.setEnabled(False)
         self.power_combo.currentIndexChanged.connect(self.on_power_changed)
-        pl_layout.addWidget(QLabel("Power:"))
-        pl_layout.addWidget(self.power_combo)
-        layout.addLayout(pl_layout)
-
-        # 4) Real‑Time Motor Sliders
-        layout.addWidget(QLabel("→ 4) Real‑Time Motor Control"))
+        power_layout.addWidget(self.power_combo, 1)
+        conn_layout.addLayout(power_layout)
+        
+        # Test button
+        test_layout = QHBoxLayout()
+        self.test1_btn = QPushButton("Test Motor 1")
+        self.test1_btn.setObjectName("success")
+        self.test1_btn.clicked.connect(self.on_test1)
+        self.test1_btn.setEnabled(False)
+        test_layout.addWidget(self.test1_btn)
+        conn_layout.addLayout(test_layout)
+        
+        connection_layout.addWidget(conn_frame)
+        
+        # Joystick section
+        joy_frame = QFrame()
+        joy_layout = QVBoxLayout(joy_frame)
+        joy_layout.setContentsMargins(15, 15, 15, 15)
+        
+        joy_title = QLabel("JOYSTICK CONTROL")
+        joy_title.setObjectName("title")
+        joy_layout.addWidget(joy_title)
+        
+        self.joystick_btn = QPushButton("Enable Joystick")
+        self.joystick_btn.setCheckable(True)
+        self.joystick_btn.setObjectName("success")
+        self.joystick_btn.clicked.connect(self.on_joystick_toggle)
+        joy_layout.addWidget(self.joystick_btn)
+        
+        self.js_status = QLabel("Status: Not connected")
+        self.js_status.setStyleSheet("font-style: italic;")
+        joy_layout.addWidget(self.js_status)
+        
+        connection_layout.addWidget(joy_frame, 1)
+        self.tab_widget.addTab(connection_tab, "Connection")
+        
+        # Motors Tab
+        motors_tab = QWidget()
+        motors_layout = QVBoxLayout(motors_tab)
+        motors_layout.setSpacing(15)
+        
+        # Motor sliders
+        motors_frame = QFrame()
+        motors_frame_layout = QVBoxLayout(motors_frame)
+        motors_frame_layout.setContentsMargins(15, 15, 15, 15)
+        
+        motors_title = QLabel("MOTOR CONTROL")
+        motors_title.setObjectName("title")
+        motors_frame_layout.addWidget(motors_title)
+        
         self.sliders = []
         for i in range(1, 5):
-            row = QHBoxLayout()
-            row.addWidget(QLabel(f"Motor {i}"))
+            motor_layout = QVBoxLayout()
+            motor_layout.addWidget(QLabel(f"MOTOR {i}"))
+            
+            slider_layout = QHBoxLayout()
             sld = QSlider(Qt.Orientation.Horizontal)
             sld.setRange(-127, 127)
             sld.setValue(0)
             sld.setEnabled(False)
             sld.valueChanged.connect(self.on_slider_changed)
-            row.addWidget(sld, stretch=1)
+            slider_layout.addWidget(sld, 1)
+            
             val_lbl = QLabel("0")
-            row.addWidget(val_lbl)
+            val_lbl.setFixedWidth(30)
+            val_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            slider_layout.addWidget(val_lbl)
+            
+            motor_layout.addLayout(slider_layout)
+            motors_frame_layout.addLayout(motor_layout)
             self.sliders.append((sld, val_lbl))
-            layout.addLayout(row)
-
-        # Reset Sliders Button
-        self.reset_btn = QPushButton("Reset Sliders to 0")
+        
+        # Reset button
+        self.reset_btn = QPushButton("Reset All Motors")
+        self.reset_btn.setObjectName("danger")
         self.reset_btn.setEnabled(False)
         self.reset_btn.clicked.connect(self.on_reset_sliders)
-        layout.addWidget(self.reset_btn)
-
-        # 5) Joystick Control Section
-        layout.addWidget(QLabel("→ 5) Joystick Control"))
-        self.joystick_btn = QPushButton("Enable Joystick")
-        self.joystick_btn.setCheckable(True)
-        self.joystick_btn.clicked.connect(self.on_joystick_toggle)
-        layout.addWidget(self.joystick_btn)
-        self.js_status = QLabel("Status: Not connected")
-        layout.addWidget(self.js_status)
+        motors_frame_layout.addWidget(self.reset_btn)
         
+        motors_layout.addWidget(motors_frame)
+        self.tab_widget.addTab(motors_tab, "Motors")
+        
+        tabs_layout.addWidget(self.tab_widget)
+        
+        # Add to splitter
+        splitter.addWidget(camera_frame)
+        splitter.addWidget(tabs_frame)
+        splitter.setSizes([700, 300])
+        
+        main_layout.addWidget(splitter, 1)
+        
+        # Log section
+        log_frame = QFrame()
+        log_layout = QVBoxLayout(log_frame)
+        log_layout.setContentsMargins(15, 15, 15, 15)
+        
+        log_title = QLabel("SYSTEM LOG")
+        log_title.setObjectName("title")
+        log_layout.addWidget(log_title)
+        
+        self.log = QTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMinimumHeight(100)
+        log_layout.addWidget(self.log)
+        
+        main_layout.addWidget(log_frame)
+        
+        self.setLayout(main_layout)
+
         # Initialize joystick variables
         self.joystick = None
         self.timer = QTimer()
         self.timer.timeout.connect(self.read_joystick)
         self.steering_gain = 0.1  # Adjust steering sensitivity
 
-        # Add after joystick section
-        layout.addWidget(QLabel("→ FPV Camera Stream"))
-        
-        # Camera URL input
-        url_layout = QHBoxLayout()
-        url_layout.addWidget(QLabel("Camera URL:"))
-        self.camera_url = QLineEdit("http://192.168.178.93:8080/video")
-        url_layout.addWidget(self.camera_url)
-        layout.addLayout(url_layout)
-        
-        # Camera control buttons
-        btn_layout = QHBoxLayout()
-        self.cam_start_btn = QPushButton("Start Stream")
-        self.cam_start_btn.clicked.connect(self.start_camera_stream)
-        btn_layout.addWidget(self.cam_start_btn)
-        
-        self.cam_stop_btn = QPushButton("Stop Stream")
-        self.cam_stop_btn.clicked.connect(self.stop_camera_stream)
-        self.cam_stop_btn.setEnabled(False)
-        btn_layout.addWidget(self.cam_stop_btn)
-        
-        # Performance controls
-        self.quality_combo = QComboBox()
-        self.quality_combo.addItems(["Low (15fps)", "Medium (20fps)", "High (30fps)"])
-        self.quality_combo.setCurrentIndex(1)
-        btn_layout.addWidget(self.quality_combo)
-        
-        layout.addLayout(btn_layout)
-        
-        # Video display
-        self.video_label = QLabel()
-        self.video_label.setMinimumSize(320, 240)
-        self.video_label.setStyleSheet("background-color: black;")
-        layout.addWidget(self.video_label)
-        
         # Camera variables
         self.camera_thread = None
         self.last_frame_time = 0
 
-        # Log
-        layout.addWidget(QLabel("Log:"))
-        self.log = QTextEdit()
-        self.log.setReadOnly(True)
-        layout.addWidget(self.log)
-
-        self.setLayout(layout)
-
-    # Camera stream functions
     # Camera stream functions
     def start_camera_stream(self):
         if not self.camera_url.text():
@@ -228,6 +458,7 @@ class BuWizzApp(QWidget):
         
         self.cam_start_btn.setEnabled(False)
         self.cam_stop_btn.setEnabled(True)
+        self.camera_status.set_status("active")
         self.log.append("▶ Camera stream started")
 
     def stop_camera_stream(self):
@@ -239,6 +470,7 @@ class BuWizzApp(QWidget):
         self.cam_stop_btn.setEnabled(False)
         self.video_label.clear()
         self.video_label.setStyleSheet("background-color: black;")
+        self.camera_status.set_status("disconnected")
         self.log.append("⏹ Camera stream stopped")
 
     @pyqtSlot(np.ndarray)
@@ -262,14 +494,14 @@ class BuWizzApp(QWidget):
             self.video_label.width(), 
             self.video_label.height(),
             Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.FastTransformation
+            Qt.TransformationMode.SmoothTransformation
         )
-        self.video_label.setPixmap(pixmap)
         
         # Display FPS in corner
         painter = QPainter(pixmap)
-        painter.setPen(Qt.GlobalColor.red)
-        painter.drawText(10, 20, f"FPS: {fps:.1f}")
+        painter.setPen(QColor(Qt.GlobalColor.white))
+        painter.setFont(QFont("Arial", 12))
+        painter.drawText(10, 30, f"FPS: {fps:.1f}")
         painter.end()
         
         self.video_label.setPixmap(pixmap)
@@ -321,6 +553,7 @@ class BuWizzApp(QWidget):
             for s, lbl in self.sliders:
                 s.setEnabled(True)
             self.connect_btn.setEnabled(False)
+            self.buwizz_status.set_status("connected")
         except Exception as e:
             self.log.append(f"❌ Connect failed: {e}")
 
@@ -338,6 +571,7 @@ class BuWizzApp(QWidget):
         for s, lbl in self.sliders:
             s.setEnabled(False)
         self.connect_btn.setEnabled(True)
+        self.buwizz_status.set_status("disconnected")
 
     # ── Notification handler ─────────────────────────────────
     def _on_notify(self, _, data: bytearray):
@@ -458,7 +692,7 @@ class BuWizzApp(QWidget):
             right_power = base_power - steering_effect
             
             # Invert the right motor (since it's mounted opposite)
-            right_power = -right_power
+            left_power = -left_power
             
             # Clamp values to motor range
             left_power = max(-127, min(127, left_power))
